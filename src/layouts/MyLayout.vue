@@ -50,7 +50,7 @@
     </q-header>
 
     <q-page-container>
-        <router-view />
+      <router-view />
     </q-page-container>
 
     <q-dialog v-model="dlg_option">
@@ -159,6 +159,5 @@ export default {
     this.label_Minimize = common.lang["最小化"];
     this.label_Close = common.lang["关闭"];
   }
-
 };
 </script>

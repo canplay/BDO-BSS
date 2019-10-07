@@ -1,25 +1,35 @@
 <template>
   <q-page padding ref="contatiner">
-    <q-input
-      standout="bg-primary text-white"
-      v-model="file"
-      label="File"
-      bg-color="blue"
-      @click="showFileDlg"
-      ref="header"
-    />
+    <div class="row">
+      <div class="col-10">
+        <q-input
+          standout="bg-primary text-white"
+          v-model="file"
+          label="File"
+          bg-color="blue"
+          @click="onOpen"
+          ref="header"
+        />
+      </div>
+
+      <div class="col-1" style="width: 1%" />
+
+      <div class="col">
+        <q-btn :label="langBtnSave" color="primary" class="fit" @click="onSave" />
+      </div>
+    </div>
 
     <q-space style="margin: 10px" />
 
     <q-table
       class="my-sticky-header-table"
       :title="total === 0 ? '' : 'count: ' + total"
-      :data="data"
-      :columns="columns"
+      :data="table.data"
+      :columns="table.columns"
       row-key="no"
       dense
-      :pagination.sync="pagination"
-      :table-style="{ 'max-height': tableHeight + 'px' }"
+      :pagination.sync="table.pagination"
+      :table-style="{ 'max-height': table.height + 'px' }"
     />
   </q-page>
 </template>
@@ -41,63 +51,45 @@
 <script>
 import fileStream from "fs";
 import format from "../components/format.js";
+import { Buffer } from "buffer";
 
 export default {
   name: "PageIndex",
 
   data() {
     return {
-      tableHeight: 0,
       file: "",
-      pagination: {
-        sortBy: "no",
-        rowsPerPage: 0
+      table: {
+        height: 0,
+        pagination: {
+          sortBy: "no",
+          rowsPerPage: 0
+        },
+        columns: [],
+        data: []
       },
-      columns: [
-        {
-          name: "no",
-          label: "No",
-          align: "left",
-          field: "no",
-          sortable: true
-        },
-        {
-          name: "name",
-          label: "Name",
-          align: "left",
-          field: "arg1"
-        },
-        {
-          name: "condition",
-          label: "Condition",
-          align: "left",
-          field: "arg2"
-        },
-        {
-          name: "setted",
-          label: "Setted",
-          align: "left",
-          field: "arg3"
-        }
-      ],
-      data: [],
-      total: 0
+      total: 0,
+      langBtnSave: ""
     };
   },
 
   methods: {
     onResize() {
-      this.tableHeight = this.$refs.contatiner.$el.clientHeight
-      - this.$refs.header.$el.clientHeight - 145;
+      this.table.height =
+        this.$refs.contatiner.$el.clientHeight -
+        this.$refs.header.$el.clientHeight -
+        145;
     },
 
-    showFileDlg() {
+    onOpen() {
       this.$q.electron.remote.dialog
         .showOpenDialog({
           properties: ["openFile"],
-          filters: [{ name: "bss", extensions: ["bss"] }]
+          filters: [{ name: "*.bss", extensions: ["bss"] }]
         })
         .then(result => {
+          if (result.canceled) return;
+
           this.file = result.filePaths[0].replace(/\\/g, "/");
 
           fileStream.open(this.file, (err, fd) => {
@@ -105,29 +97,56 @@ export default {
               return console.error(err);
             }
 
-            this.data = [];
+            this.table.columns = [];
+            this.table.data = [];
             this.parseTotal(fd);
 
-            let filename = this.file.lastIndexOf("/");
+            let filename = this.file.substring(
+              this.file.lastIndexOf("/") + 1,
+              this.file.length
+            );
 
-            switch (this.file.substring(filename + 1, this.file.length)) {
+            switch (filename) {
               case "eventmanagement.bss":
-                this.parseEventSection(fd, 2, 4);
+                this.table.columns = format.event.columns;
+                this.parseEventSection(
+                  fd,
+                  Int16Array.BYTES_PER_ELEMENT,
+                  Int16Array.BYTES_PER_ELEMENT * 2
+                );
+                this.parseFix(fd);
                 break;
               case "cashproduct.bss":
-                this.parseCashSection(fd, 2, 4);
+                this.table.columns = format.shop.columns;
+                this.parseCashSection(
+                  fd,
+                  Int16Array.BYTES_PER_ELEMENT,
+                  Int16Array.BYTES_PER_ELEMENT * 2
+                );
                 break;
             }
           });
         });
     },
 
-    hexToStr(hex) {
-      let val = "";
-      for (let index = 0; index < hex.byteLength; index++) {
-        val += String.fromCharCode(hex.getInt8(index, true));
-      }
-      return val;
+    onSave() {
+      this.$q.electron.remote.dialog
+        .showSaveDialog({
+          filters: [{ name: "*.bss", extensions: ["bss"] }]
+        })
+        .then(result => {
+          if (result.canceled) return;
+
+          this.file = result.filePath.replace(/\\/g, "/");
+
+          fileStream.open(this.file, "w", (err, fd) => {
+            if (err) {
+              return console.error(err);
+            }
+
+            this.writeEvent(fd);
+          });
+        });
     },
 
     parseTotal(fd) {
@@ -156,21 +175,9 @@ export default {
             }
 
             if (bytes > 0) {
-              format.no = hex.getInt16(0, true);
+              format.shop.no = hex.getInt16(0, true);
+              this.data.push({ ...format.shop });
               this.parseCashSection(fd, 1, offset + size + 1, 0);
-            }
-          });
-          break;
-
-        case 0:
-          fileStream.read(fd, hex, 0, size, offset, (err, bytes) => {
-            if (err) {
-              console.log(err);
-            }
-
-            if (bytes > 0) {
-              format.no = hex.getInt16(0, true);
-              this.parseCashSection(fd, 1, offset + size + 1, 1);
             }
           });
           break;
@@ -178,25 +185,31 @@ export default {
     },
 
     parseEventSection(fd, size, offset, rounds) {
-      let buf = new ArrayBuffer(1024);
-      let hex = new DataView(buf);
+      let buf;
 
       switch (rounds) {
         default:
-          fileStream.read(fd, hex, 0, size, offset, (err, bytes) => {
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
             if (err) {
               console.log(err);
             }
 
             if (bytes > 0) {
-              format.event.no = hex.getInt16(0, true);
-              this.parseEventSection(fd, 2, offset + size, 0);
+              format.event.no = buf.readInt16LE();
+              this.parseEventSection(
+                fd,
+                Int16Array.BYTES_PER_ELEMENT,
+                offset + size,
+                0
+              );
             }
           });
           break;
 
         case 0:
-          fileStream.read(fd, hex, 0, size, offset, (err, bytes) => {
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
             if (err) {
               console.log(err);
             }
@@ -204,8 +217,8 @@ export default {
             if (bytes > 0) {
               this.parseEventSection(
                 fd,
-                hex.getInt16(0, true),
-                offset + size + 6,
+                buf.readInt16LE() * Int16Array.BYTES_PER_ELEMENT,
+                offset + size + Int16Array.BYTES_PER_ELEMENT * 3,
                 1
               );
             }
@@ -213,20 +226,27 @@ export default {
           break;
 
         case 1:
-          fileStream.read(fd, hex, 0, size * 2, offset, (err, bytes) => {
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
             if (err) {
               console.log(err);
             }
 
             if (bytes > 0) {
-              format.event.arg1 = this.hexToStr(hex);
-              this.parseEventSection(fd, 2, offset + size * 2, 2);
+              format.event.name = buf.toString();
+              this.parseEventSection(
+                fd,
+                Int16Array.BYTES_PER_ELEMENT,
+                offset + size,
+                2
+              );
             }
           });
           break;
 
         case 2:
-          fileStream.read(fd, hex, 0, size, offset, (err, bytes) => {
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
             if (err) {
               console.log(err);
             }
@@ -234,8 +254,8 @@ export default {
             if (bytes > 0) {
               this.parseEventSection(
                 fd,
-                hex.getInt16(0, true),
-                offset + size + 6,
+                buf.readInt16LE() * Int16Array.BYTES_PER_ELEMENT,
+                offset + size + Int16Array.BYTES_PER_ELEMENT * 3,
                 3
               );
             }
@@ -243,20 +263,27 @@ export default {
           break;
 
         case 3:
-          fileStream.read(fd, hex, 0, size * 2, offset, (err, bytes) => {
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
             if (err) {
               console.log(err);
             }
 
             if (bytes > 0) {
-              format.event.arg2 = this.hexToStr(hex);
-              this.parseEventSection(fd, 2, offset + size * 2, 4);
+              format.event.condition = buf.toString();
+              this.parseEventSection(
+                fd,
+                Int16Array.BYTES_PER_ELEMENT,
+                offset + size,
+                4
+              );
             }
           });
           break;
 
         case 4:
-          fileStream.read(fd, hex, 0, size, offset, (err, bytes) => {
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
             if (err) {
               console.log(err);
             }
@@ -264,8 +291,8 @@ export default {
             if (bytes > 0) {
               this.parseEventSection(
                 fd,
-                hex.getInt16(0, true),
-                offset + size + 6,
+                buf.readInt16LE() * Int16Array.BYTES_PER_ELEMENT,
+                offset + size + Int16Array.BYTES_PER_ELEMENT * 3,
                 5
               );
             }
@@ -273,24 +300,157 @@ export default {
           break;
 
         case 5:
-          fileStream.read(fd, hex, 0, size * 2, offset, (err, bytes) => {
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
             if (err) {
               console.log(err);
             }
 
             if (bytes > 0) {
-              format.event.arg3 = this.hexToStr(hex);
-              this.data.push({ ...format.event });
-              this.parseEventSection(fd, 2, offset + size * 2 + 1);
+              format.event.setted = buf.toString();
+              this.table.data.push({ ...format.event });
+
+              // let buf1 = new Buffer.alloc(1);
+              // fileStream.read(fd, buf1, 0, size, offset, (err, bytes) => {
+              //   if (err) {
+              //     console.log(err);
+              //   }
+
+              //   if (bytes > 0) {
+              //     if (buf1.readInt16LE() === 0) {
+              //       buf1 = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+
+              //       if (buf1.readInt16LE() == 0) {
+                      this.parseEventSection(
+                        fd,
+                        Int16Array.BYTES_PER_ELEMENT,
+                        offset + size + 1
+                      );
+              //       }
+              //     }
+              //   }
+              // });
             }
           });
           break;
       }
+    },
+
+    parseFix(fd, size, offset, round) {
+      let buf;
+
+      switch (round) {
+        default:
+          buf = new Buffer.alloc(size);
+          fileStream.read(fd, buf, 0, size, offset, (err, bytes) => {
+            if (err) {
+              console.log(err);
+            }
+
+            if (bytes > 0) {
+              console.log(buf);
+            }
+          });
+          break;
+      }
+    },
+
+    writeEvent(fd) {
+      let buf;
+      let total = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+      total.writeInt16LE(this.total);
+      buf = Buffer.concat(
+        [total, Buffer.alloc(Int16Array.BYTES_PER_ELEMENT)],
+        total.length + Int16Array.BYTES_PER_ELEMENT
+      );
+
+      for (let index = 0; index < this.table.data.length; index++) {
+        const val = this.table.data[index];
+        let no = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+        no.writeInt16LE(val.no);
+
+        let nameLen = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+        nameLen.writeInt16LE(val.name.length / 2);
+        let name = new Buffer.alloc(val.name.length);
+        name.write(val.name);
+
+        let conditionLen = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+        conditionLen.writeInt16LE(val.condition.length / 2);
+        let condition = new Buffer.alloc(val.condition.length);
+        condition.write(val.condition);
+
+        let settedLen = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+        settedLen.writeInt16LE(val.setted.length / 2);
+        let setted = new Buffer.alloc(val.setted.length);
+        setted.write(val.setted);
+
+        buf = Buffer.concat([
+          buf,
+          no,
+          nameLen,
+          Buffer.alloc(Int16Array.BYTES_PER_ELEMENT * 3),
+          name,
+          conditionLen,
+          Buffer.alloc(Int16Array.BYTES_PER_ELEMENT * 3),
+          condition,
+          settedLen,
+          Buffer.alloc(Int16Array.BYTES_PER_ELEMENT * 3),
+          setted,
+          Buffer.alloc(1)
+        ]);
+      }
+
+      // this.table.data.forEach(val => {
+      //   let no = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+      //   no.writeInt16LE(val.no);
+
+      //   let nameLen = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+      //   nameLen.writeInt16LE(val.name.length / 2);
+      //   let name = new Buffer.alloc(val.name.length);
+      //   name.write(val.name);
+
+      //   let conditionLen = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+      //   conditionLen.writeInt16LE(val.condition.length / 2);
+      //   let condition = new Buffer.alloc(val.condition.length);
+      //   condition.write(val.condition);
+
+      //   let settedLen = new Buffer.alloc(Int16Array.BYTES_PER_ELEMENT);
+      //   settedLen.writeInt16LE(val.setted.length / 2);
+      //   let setted = new Buffer.alloc(val.setted.length);
+      //   setted.write(val.setted);
+
+      //   console.log(val.no, setted.toString())
+
+      //   buf = Buffer.concat(
+      //     [
+      //       buf,
+      //       no,
+      //       nameLen,
+      //       Buffer.alloc(Int16Array.BYTES_PER_ELEMENT * 3),
+      //       name,
+      //       conditionLen,
+      //       Buffer.alloc(Int16Array.BYTES_PER_ELEMENT * 3),
+      //       condition,
+      //       settedLen,
+      //       Buffer.alloc(Int16Array.BYTES_PER_ELEMENT * 3),
+      //       setted,
+      //       Buffer.alloc(1)
+      //     ]
+      //   );
+      // });
+
+      fileStream.write(fd, buf, 0, buf.length, 0, err => {
+        if (err) {
+          console.log(err);
+        }
+      });
     }
   },
 
   created() {
     window.addEventListener("resize", this.onResize);
+
+    this.langBtnSave = "保存";
   },
 
   mounted() {
